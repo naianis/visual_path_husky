@@ -7,6 +7,7 @@ import numpy as np
 from cv_bridge import CvBridge, CvBridgeError
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Image
+from visual_path_husky.msg import SysStatus
 from std_msgs.msg import Bool
 from move_husky import MoveHusky
 
@@ -17,15 +18,15 @@ class LineFollower(object):
 
         self.bridge_object = CvBridge()
         self.image_sub = rospy.Subscriber("/camera/rgb/image_raw",Image,self.camera_callback)
-        self.safety_subscriber = rospy.Subscriber("/safety_controller", Bool, self.safety_callback)
+        self.safety_subscriber = rospy.Subscriber("/safety_controller", SysStatus, self.safety_callback)
         self.move_obj = MoveHusky()
-        self.safety_flag = False
+        self.safety_flag = SysStatus()
 
     def safety_callback(self,s_data):
-        self.safety_flag = s_data.data
+        self.safety_flag = s_data
         print("safety flag is: ") + str(self.safety_flag)
 
-        if self.safety_flag:
+        if self.safety_flag.flag:
             self.cleanup()
 
 
@@ -38,6 +39,7 @@ class LineFollower(object):
             print(e)
 
         '''
+        It might be necessary adjust the collors to your enviroment.
         RGB = [124, 118, 0]     BGR = [0,118,124]       HSV= [[[ 35 255 255]]]
         ---- NEW ---
         MIN_RGB = [31 30 9]     MAX_RGB = [57,54,0]
@@ -88,7 +90,7 @@ class LineFollower(object):
         twist_obj.linear.x = v
         twist_obj.angular.z = w
 
-        if self.safety_flag :
+        if self.safety_flag.flag :
             twist_obj.linear.x = 0
             twist_obj.angular.z = 0
             #print("ma oee") + str(self.safety_flag)
@@ -100,8 +102,7 @@ class LineFollower(object):
         self.move_obj.clean_class()
         #cv2.destroyAllWindows()
 
-        if self.safety_flag == True:
-            #rospy.sleep(1)
+        if self.safety_flag.flag == True:
             rospy.loginfo("Waiting...")
 
 
