@@ -7,39 +7,133 @@ import tf
 import matplotlib.pyplot as plt
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
-from geometry_msgs.msg import Quaternion
+from geometry_msgs.msg import Quaternion, Point
+from visual_path_husky.msg import SysStatus
+
+from visualization_msgs.msg import Marker, MarkerArray
+from geometry_msgs.msg import Quaternion, Pose, Point, Vector3
+from std_msgs.msg import Header, ColorRGBA
 
 class MoveToGoal(object):
 
 	def __init__(self):
-		self.sub_obj = rospy.Subscriber('/odometry/filtered', Odometry, self.OdomCallback)
 		self.pub_obj = rospy.Publisher('/cmd_vel', Twist, queue_size=5)
+		self.safety_sub = rospy.Subscriber('/safety_controller', SysStatus, self.SafetyCallback)
+		self.sub_obj = rospy.Subscriber('/odometry/filtered', Odometry, self.OdomCallback)
 
+		self.marker_publisher = rospy.Publisher('/visualization_marker', Marker, queue_size=1)
+
+		self.safety_msg = SysStatus()
 		self.iz = 0							#trajectory matrix counter
-		self.sin_signal = 1					#this signal should indicate which direction the circle should be performanced. Based on robot's actual orientation
+		self.flag_keeper = False
+		self.process_begin = False
 
 		# minimal radius of 1.5m to function!
-		initial_point = [3, 0]
-		final_point =  [8, 0]
-
-		self.traj_x, self.traj_y = self.PointsInCircumference(initial_point,final_point, self.sin_signal)
 
 
-	def PointsInCircumference(self,ip,fp,sin_signal):
+	def show_marker_in_rviz(self, marker_publisher, vx, vy):
+
+		pontos = Point()
+		marker = Marker()
+
+		marker.header.frame_id = "odom"
+		marker.type = marker.SPHERE_LIST
+		marker.action = marker.ADD
+
+		# marker scale
+		marker.scale.x = 0.1
+		marker.scale.y = 0.1
+		marker.scale.z = 0.1
+
+		# marker color
+		marker.color.a = 1.0
+		marker.color.r = 1.0
+		marker.color.g = 1.0
+		marker.color.b = 0.0
+
+		# marker orientaiton
+		marker.pose.orientation.x = 0.0
+		marker.pose.orientation.y = 0.0
+		marker.pose.orientation.z = 0.0
+		marker.pose.orientation.w = 1.0
+
+		# marker position
+		marker.pose.position.x = 0.0
+		marker.pose.position.y = 0.0
+		marker.pose.position.z = 0.0
+
+		# marker line points
+		marker.points = []
+		k=0
+
+		while k < len(vx):
+			pontos.x = vx[k]
+			pontos.y = vy[k]
+			pontos.z = 0.0
+			marker.points.append(Point(vx[k],vy[k],0.0))
+			k = k+1
+
+		print(marker.points)
+	    # Publish the Marker
+		self.marker_publisher.publish(marker)
+
+
+	def is_factible(self, vx, vy):
+		#Husky dimensions
+		L = 0.544
+		travesal_angle = 0.523599 #30 degrees
+		ICR_radius = L / math.tan(travesal_angle)
+		print("ICR radius = ") + str(ICR_radius)
+
+		position = self.safety_msg.initial_position
+		left_ICR_centre = position[0] + math.cos(position[2])*ICR_radius, position[1] + math.sin(position[2])*ICR_radius
+		right_ICR_centre = position[0] - math.cos(position[2])*ICR_radius, position[1] - math.sin(position[2])*ICR_radius
+		print("Left centre = ") + str(left_ICR_centre)
+		print("right centre = ") + str(right_ICR_centre)
+
+		new_vx = []
+		new_vy = []
+		for i in range(32):
+			#d_left = math.sqrt(pow(left_ICR_centre[0] - vx[i], 2) + pow(left_ICR_centre[1]- vy[i] ,2))
+			d_right = math.sqrt(pow((right_ICR_centre[0] - vx[i]), 2) + pow((right_ICR_centre[1]- vy[i]) ,2))
+			#print("left distance: ") +str(d_left)
+			print("right distance: ") +str(d_right)
+			if d_right > ICR_radius :
+				new_vx.append(vx[i])
+				new_vy.append(vy[i])
+				print("factible ") + str(i)
+
+
+		#print new_vx
+		#print new_vy
+		return new_vy, new_vx
+
+
+	def PointsInCircumference(self,initial_position):
 		# Finds the radius of the circumference
-		r = math.sqrt((ip[0]-fp[0])**2 + (ip[1]-fp[1])**2)/2
-		print(r)
+		#r = math.sqrt((ip[0]-fp[0])**2 + (ip[1]-fp[1])**2)/2
+		r = self.safety_msg.obstacle_size + 1		# + 1 m for safety
+		if r < 2:
+			r = 2
+		print("radius = ") + str(r)
 
 		# Finds the linear coeficient theta
-		theta = math.atan2(fp[1]-ip[1],fp[0]-ip[0])
-		#print(theta)
+		#theta = math.atan2(fp[1]-ip[1],fp[0]-ip[0])
+		theta = self.safety_msg.initial_position[2]
+		print("theta = ") + str(theta)
+
+		if theta < math.pi/2 and theta > -math.pi/2:
+			sin_signal = 1
+		else:
+			sin_signal = -1
+		print("sin signal = ") + str(sin_signal)
 
 		# Finds the initial angle value to calculate semi circumference
 		thetai = theta - math.pi
 		#print(thetai)
 
 		# Calculates the origin of the circumference
-		origin = [r * math.cos(theta) + ip[0], r * math.sin(theta) + ip[1]]
+		origin = [r * math.cos(theta) + initial_position[0], r * math.sin(theta) + initial_position[1]]
 		#print(origin)
 
 		# Equacao da reta em x: x(t) = r cos(t) + j
@@ -56,14 +150,30 @@ class MoveToGoal(object):
 			t = t + 0.1
 			i+=1
 
+
 		plt.plot(x,y,'ro')
 		#plt.show()
 
-		return x, y
+		fac_x, fac_y = self.is_factible(y,x)
+		self.show_marker_in_rviz(self.marker_publisher, fac_x, fac_y)
+
+		return fac_x, fac_y
+
+
+	def SafetyCallback(self,status_msg):
+		self.safety_msg = status_msg
+
+		if self.flag_keeper != status_msg.flag and self.process_begin == False:
+			self.traj_x, self.traj_y = self.PointsInCircumference(self.safety_msg.initial_position)
+			self.flag_keeper = status_msg.flag
+			self.process_begin = True
+			print(self.safety_msg)
 
 
 	def OdomCallback(self,robot_state):
 
+		if self.safety_msg.flag == False and self.process_begin == False:
+			return
 		#initial_point e final_point devem ser parametros de acordo com a informacao recebida do lidar
 
 		v_max = 5.0
@@ -83,7 +193,7 @@ class MoveToGoal(object):
 
 		# velocities coeficients
 		kp = 0.1
-		ka = 0.7
+		ka = 1
 
 		# linear and angular errors
 		p = math.sqrt( pow(dx,2) + pow(dy,2) )
@@ -116,15 +226,16 @@ class MoveToGoal(object):
 		twist_obj.angular.z = w_ref
 		self.pub_obj.publish(twist_obj)
 
-		if p < 0.2 :
+		if p < 0.4 :
 			print("GOT TO GOAL") + str(robot_state)
 			self.iz = self.iz + 1
 
-			if self.iz >=32 :
+			if self.iz >= len(self.traj_x) :
 				twist_obj = Twist()
 				twist_obj.linear.x = 0.0
 				twist_obj.angular.z = 0.0
 				self.pub_obj.publish(twist_obj)
+				process_begin = False
 				rospy.loginfo("Shutdown time!")
 				rospy.sleep(1)
 				rospy.signal_shutdown("an exception")
