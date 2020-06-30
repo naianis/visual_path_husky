@@ -19,14 +19,22 @@ class LineFollower(object):
         self.bridge_object = CvBridge()
         self.image_sub = rospy.Subscriber("/camera/rgb/image_raw",Image,self.camera_callback)
         self.safety_subscriber = rospy.Subscriber("/safety_controller", SysStatus, self.safety_callback)
+        self.line_feedback_publisher = rospy.Publisher('/line_control', Bool)
         self.move_obj = MoveHusky()
         self.safety_flag = SysStatus()
+        self.line_feedback = Bool()
+
+        self.no_blob = False
+        self.comeback_flag = False
+        self.counter = 0
+        self.counter_2 = 0
 
     def safety_callback(self,s_data):
         self.safety_flag = s_data
-        print("safety flag is: ") + str(self.safety_flag)
+        #print("safety flag is: ") + str(self.safety_flag)
 
         if self.safety_flag.flag:
+            self.counter = 0
             self.cleanup()
 
 
@@ -46,8 +54,8 @@ class LineFollower(object):
         '''
 
         height, width, channels = cv_image.shape
-        descentre = 160
-        rows_to_watch = 50
+        descentre = 10
+        rows_to_watch = 300
         crop_img = cv_image[(height)/2+descentre:(height)/2+(descentre+rows_to_watch)][1:width]
 
         hsv = cv2.cvtColor(crop_img, cv2.COLOR_BGR2HSV)
@@ -58,12 +66,17 @@ class LineFollower(object):
         mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
         res = cv2.bitwise_and(crop_img,crop_img, mask= mask)
 
+        come_back_holder = self.no_blob
         # Calculate centroid of the blob of binary image using ImageMoments
         m = cv2.moments(mask, False)
+
         try:
             cx, cy = m['m10']/m['m00'], m['m01']/m['m00']
+            self.no_blob = False
         except ZeroDivisionError:
             cy, cx = height/2, width/2
+            self.no_blob = True
+            rospy.loginfo("No line detected")
 
 
         cv2.circle(res,(int(cx), int(cy)), 10,(0,0,255),-1)
@@ -72,14 +85,31 @@ class LineFollower(object):
         cv2.imshow("HSV", hsv)
         cv2.imshow("MASK", mask)
         cv2.imshow("RES", res)
+
+        cv2.imshow("Original", cv_image)
+        cv2.imshow("HSV", hsv)
         '''
         cv2.waitKey(1)
 
         error = cx - width/2
         #Proportional control
-        v = 0.4
+        v = 0.3
         w = -error/100
-        w_max = 0.6
+        w_max = 1.5
+
+        if come_back_holder == True and self.no_blob == False:
+            self.comeback_flag = True
+
+
+        if m['m10'] > 1700000000 and self.comeback_flag:
+            w = -1
+            self.counter_2 += 1
+            print(m['m10'])
+
+        if self.counter_2 > 10:
+            self.comeback_flag = False
+            self.counter_2 = 0
+
 
         if w > w_max:
             w = w_max
@@ -90,16 +120,23 @@ class LineFollower(object):
         twist_obj.linear.x = v
         twist_obj.angular.z = w
 
-        if self.safety_flag.flag :
-            twist_obj.linear.x = 0
-            twist_obj.angular.z = 0
-            #print("ma oee") + str(self.safety_flag)
+        self.line_feedback = False
 
-        #rospy.loginfo("Angular value = "+str(twist_obj.angular.z))
-        self.move_obj.move_robot(twist_obj)
+        if not self.safety_flag.flag and not self.no_blob :
+            self.move_obj.line_move_robot(twist_obj)
+            self.line_feedback = True
+            self.counter += 1
+            print("seguindo linha")
+            if self.counter > 10:
+                self.line_feedback = False
+
+
+        self.line_feedback_publisher.publish(self.line_feedback)
+
+
 
     def cleanup(self):
-        self.move_obj.clean_class()
+        #self.move_obj.line_clean_class()
         #cv2.destroyAllWindows()
 
         if self.safety_flag.flag == True:
@@ -112,7 +149,7 @@ def main():
     rospy.init_node('line_following_node', anonymous=True)
     line_follower_object = LineFollower()
 
-    rate = rospy.Rate(5)
+    rate = rospy.Rate(10)
     ctrl_c = False
 
     def shutdownhook():
