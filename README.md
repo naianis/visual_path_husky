@@ -8,3 +8,4 @@ It's necessary to insert the world model in your .gazebo/models folder.
 Download to your workspace
 
 catkin_make
+full_husky.launch
