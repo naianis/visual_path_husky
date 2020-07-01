@@ -5,6 +5,7 @@ import math
 import numpy
 import tf
 import matplotlib.pyplot as plt
+from move_husky import MoveHusky
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Quaternion, Point
@@ -12,7 +13,7 @@ from visual_path_husky.msg import SysStatus
 
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Quaternion, Pose, Point, Vector3
-from std_msgs.msg import Header, ColorRGBA
+from std_msgs.msg import Header, ColorRGBA, Bool
 
 class MoveToGoal(object):
 
@@ -22,11 +23,14 @@ class MoveToGoal(object):
 		self.sub_obj = rospy.Subscriber('/odometry/filtered', Odometry, self.OdomCallback)
 
 		self.marker_publisher = rospy.Publisher('/visualization_marker', Marker, queue_size=1)
+		self.circle_control_publisher = rospy.Publisher('/circle_control', Bool, queue_size=3)
 
 		self.safety_msg = SysStatus()
 		self.iz = 0							#trajectory matrix counter
 		self.flag_keeper = False
 		self.process_begin = False
+
+		self.move_obj = MoveHusky()
 
 		# minimal radius of 1.5m to function!
 
@@ -78,66 +82,26 @@ class MoveToGoal(object):
 		self.marker_publisher.publish(marker)
 
 
-	def is_factible(self, vx, vy):
-		#Husky dimensions
-		L = 0.544
-		travesal_angle = 0.523599 #30 degrees
-		ICR_radius = L / math.tan(travesal_angle)
-		print("ICR radius = ") + str(ICR_radius)
-
-		position = self.safety_msg.initial_position
-		left_ICR_centre = position[0] + math.cos(position[2])*ICR_radius, position[1] + math.sin(position[2])*ICR_radius
-		right_ICR_centre = position[0] - math.cos(position[2])*ICR_radius, position[1] - math.sin(position[2])*ICR_radius
-		print("Left centre = ") + str(left_ICR_centre)
-		print("right centre = ") + str(right_ICR_centre)
-
-		new_vx = []
-		new_vy = []
-		for i in range(32):
-			#d_left = math.sqrt(pow(left_ICR_centre[0] - vx[i], 2) + pow(left_ICR_centre[1]- vy[i] ,2))
-			d_right = math.sqrt(pow((right_ICR_centre[0] - vx[i]), 2) + pow((right_ICR_centre[1]- vy[i]) ,2))
-			#print("left distance: ") +str(d_left)
-			print("right distance: ") +str(d_right)
-			if d_right > ICR_radius :
-				new_vx.append(vx[i])
-				new_vy.append(vy[i])
-				print("factible ") + str(i)
-
-
-		#print new_vx
-		#print new_vy
-		return new_vy, new_vx
-
-
 	def PointsInCircumference(self,initial_position):
 		# Finds the radius of the circumference
-		#r = math.sqrt((ip[0]-fp[0])**2 + (ip[1]-fp[1])**2)/2
-		r = self.safety_msg.obstacle_size + 1		# + 1 m for safety
+		r = self.safety_msg.obstacle_size + 0.5		# + 1 m for safety
 		if r < 2:
 			r = 2
-		print("radius = ") + str(r)
 
 		# Finds the linear coeficient theta
-		#theta = math.atan2(fp[1]-ip[1],fp[0]-ip[0])
 		theta = self.safety_msg.initial_position[2]
-		print("theta = ") + str(theta)
 
 		if theta < math.pi/2 and theta > -math.pi/2:
 			sin_signal = 1
 		else:
 			sin_signal = -1
-		print("sin signal = ") + str(sin_signal)
 
 		# Finds the initial angle value to calculate semi circumference
 		thetai = theta - math.pi
-		#print(thetai)
 
 		# Calculates the origin of the circumference
 		origin = [r * math.cos(theta) + initial_position[0], r * math.sin(theta) + initial_position[1]]
-		#print(origin)
 
-		# Equacao da reta em x: x(t) = r cos(t) + j
-		# Equacao da reta em y: y(t) = r sen(t) + k
 		x = numpy.zeros(33)
 		y = numpy.zeros(33)
 		t=0.0
@@ -154,20 +118,26 @@ class MoveToGoal(object):
 		plt.plot(x,y,'ro')
 		#plt.show()
 
-		fac_x, fac_y = self.is_factible(y,x)
-		self.show_marker_in_rviz(self.marker_publisher, fac_x, fac_y)
-
-		return fac_x, fac_y
+		self.show_marker_in_rviz(self.marker_publisher, x, y)
+		return x, y
 
 
 	def SafetyCallback(self,status_msg):
 		self.safety_msg = status_msg
 
-		if self.flag_keeper != status_msg.flag and self.process_begin == False:
+		if status_msg.flag and not self.process_begin:
+			rospy.sleep(0.5)
 			self.traj_x, self.traj_y = self.PointsInCircumference(self.safety_msg.initial_position)
 			self.flag_keeper = status_msg.flag
 			self.process_begin = True
 			print(self.safety_msg)
+
+		circle_flag = Bool()
+		circle_flag = False
+		if self.iz < len(self.traj_x) / 2 and self.process_begin:
+			circle_flag = True
+
+		self.circle_control_publisher.publish(circle_flag)
 
 
 	def OdomCallback(self,robot_state):
@@ -176,12 +146,19 @@ class MoveToGoal(object):
 			return
 		#initial_point e final_point devem ser parametros de acordo com a informacao recebida do lidar
 
+		if self.safety_msg.found_line:
+			self.process_begin = False
+			self.iz = 0
+			return
+
+		if not self.process_begin:
+			return
+
 		v_max = 5.0
-		w_max = 1.0
+		w_max = 2.0
 
 		goal_x = self.traj_x[self.iz]
 		goal_y = self.traj_y[self.iz]
-		print ("goal x = ") + str(goal_x) + (" goal y = ") + str(goal_y) + ("    iz = ") + str(self.iz)
 
 		# transform from quaternion for yaw degrees
 		quaternion = (robot_state.pose.pose.orientation.x, robot_state.pose.pose.orientation.y, robot_state.pose.pose.orientation.z, robot_state.pose.pose.orientation.w)
@@ -199,10 +176,8 @@ class MoveToGoal(object):
 		p = math.sqrt( pow(dx,2) + pow(dy,2) )
 		a = -yaw + math.atan2(dy,dx)
 
-		print ("p = ") + str(p) + (" a = ") + str(a)
-
 		# calculates proportional linear and angular velocities
-		v_ref = kp * p + 0.2
+		v_ref = kp * p + 0.1
 		w_ref = ka * a
 
 		#restricts the maximum velocities
@@ -216,37 +191,33 @@ class MoveToGoal(object):
 		if w_ref < -w_max:
 			w_ref = -w_max
 
-		print ("robot_state_x ") + str(robot_state.pose.pose.position.x) +(" robot_state_y ") + str(robot_state.pose.pose.position.y) +(" robot_state_theta ") + str(yaw)
-		print ("velocidade v ") + str(v_ref) +(" velocidade w ") + str(w_ref)
-		print(" ")
+		twist_obj = Twist()
+
+		if self.iz < 2 and abs(a) > 0.15:
+			v_ref = 0
+
+		if self.iz >= len(self.traj_x) - 1 :
+			twist_obj.linear.x = 0.5
+			twist_obj.angular.z = 0.0
+			print("Bigger iz")
 
 		# publishes velocities
-		twist_obj = Twist()
 		twist_obj.linear.x = v_ref
 		twist_obj.angular.z = w_ref
-		self.pub_obj.publish(twist_obj)
+		self.move_obj.move_robot(twist_obj)
 
-		if p < 0.4 :
-			print("GOT TO GOAL") + str(robot_state)
+		if p < 0.2 :
+			print("Got to goal ") + str(self.iz)
 			self.iz = self.iz + 1
 
-			if self.iz >= len(self.traj_x) :
-				twist_obj = Twist()
-				twist_obj.linear.x = 0.0
-				twist_obj.angular.z = 0.0
-				self.pub_obj.publish(twist_obj)
-				process_begin = False
-				rospy.loginfo("Shutdown time!")
-				rospy.sleep(1)
-				rospy.signal_shutdown("an exception")
 
 
 
 def main():
-	rospy.init_node('point_stabilization')
+	rospy.init_node('circle_performer')
 	goal_obj = MoveToGoal()
 
-	rate = rospy.Rate(5)
+	rate = rospy.Rate(10)
 
 	while not rospy.is_shutdown():
 		rate.sleep
